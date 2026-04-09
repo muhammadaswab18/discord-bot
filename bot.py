@@ -5,7 +5,8 @@ from zoneinfo import ZoneInfo
 import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
-from openpyxl import Workbook, load_workbook
+import gspread
+from google.oauth2.service_account import Credentials
 
 load_dotenv()
 
@@ -18,7 +19,8 @@ MORNING_MINUTE = int(os.getenv("MORNING_MINUTE", "0"))
 EVENING_HOUR = int(os.getenv("EVENING_HOUR", "18"))
 EVENING_MINUTE = int(os.getenv("EVENING_MINUTE", "45"))
 
-EXCEL_FILE = "daily_updates.xlsx"
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
+GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -31,87 +33,89 @@ session_state = {
     "date": None,
     "morning": {
         "active": False,
+        "session_message_id": None,
         "status_message_id": None,
         "replied_users": set(),
         "user_steps": {}
     },
     "evening": {
         "active": False,
+        "session_message_id": None,
         "status_message_id": None,
         "replied_users": set(),
         "user_steps": {}
     },
 }
 
+HEADERS = [
+    "Date",
+    "User ID",
+    "Username",
+    "Display Name",
+    "Morning Working On",
+    "Morning Blockers / Additional Note",
+    "Morning Timestamp",
+    "Evening Achieved",
+    "Evening Pending / Blockers",
+    "Evening Timestamp",
+]
 
-def ensure_workbook():
-    if not os.path.exists(EXCEL_FILE):
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Updates"
-        ws.append([
-            "Date",
-            "User ID",
-            "Username",
-            "Display Name",
-            "Morning Working On",
-            "Morning Blockers / Notes",
-            "Morning Timestamp",
-            "Evening Achieved",
-            "Evening Pending / Blockers",
-            "Evening Timestamp",
-        ])
-        wb.save(EXCEL_FILE)
+def get_gsheet():
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_file(
+        GOOGLE_SERVICE_ACCOUNT_FILE,
+        scopes=scopes
+    )
+    client = gspread.authorize(creds)
+    sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
+    return sheet
 
+def ensure_sheet_headers():
+    sheet = get_gsheet()
+    first_row = sheet.row_values(1)
+    if first_row != HEADERS:
+        if not first_row:
+            sheet.append_row(HEADERS)
+        else:
+            sheet.update(range_name="A1:J1", values=[HEADERS])
+
+def find_row(sheet, date_str, user_id):
+    records = sheet.get_all_values()
+    for idx, row in enumerate(records[1:], start=2):
+        row_date = row[0] if len(row) > 0 else ""
+        row_user_id = row[1] if len(row) > 1 else ""
+        if str(row_date) == str(date_str) and str(row_user_id) == str(user_id):
+            return idx
+    return None
 
 def save_update(date_str, user, update_type, part1, part2, timestamp_str):
-    ensure_workbook()
-    wb = load_workbook(EXCEL_FILE)
-    ws = wb["Updates"]
+    sheet = get_gsheet()
+    row_num = find_row(sheet, date_str, user.id)
 
-    target_row = None
-
-    for row in range(2, ws.max_row + 1):
-        row_date = ws.cell(row=row, column=1).value
-        row_user_id = ws.cell(row=row, column=2).value
-        if str(row_date) == date_str and str(row_user_id) == str(user.id):
-            target_row = row
-            break
-
-    if target_row is None:
-        target_row = ws.max_row + 1
-        ws.cell(row=target_row, column=1, value=date_str)
-        ws.cell(row=target_row, column=2, value=str(user.id))
-        ws.cell(row=target_row, column=3, value=str(user))
-        ws.cell(row=target_row, column=4, value=message_safe_display_name(user))
+    if row_num is None:
+        new_row = [
+            date_str,
+            str(user.id),
+            str(user),
+            getattr(user, "display_name", str(user)),
+            "", "", "", "", "", ""
+        ]
+        sheet.append_row(new_row)
+        row_num = find_row(sheet, date_str, user.id)
 
     if update_type == "morning":
-        ws.cell(row=target_row, column=5, value=part1)
-        ws.cell(row=target_row, column=6, value=part2)
-        ws.cell(row=target_row, column=7, value=timestamp_str)
+        sheet.update(f"E{row_num}:G{row_num}", [[part1, part2, timestamp_str]])
     elif update_type == "evening":
-        ws.cell(row=target_row, column=8, value=part1)
-        ws.cell(row=target_row, column=9, value=part2)
-        ws.cell(row=target_row, column=10, value=timestamp_str)
-
-    wb.save(EXCEL_FILE)
-
-
-def message_safe_display_name(user):
-    return getattr(user, "display_name", str(user))
-
+        sheet.update(f"H{row_num}:J{row_num}", [[part1, part2, timestamp_str]])
 
 def get_now():
     return datetime.now(TZ)
 
-
 def get_today_str():
     return get_now().strftime("%Y-%m-%d")
 
-
 def get_target_members(guild):
     return [member for member in guild.members if not member.bot]
-
 
 def reset_for_new_day():
     today = get_today_str()
@@ -119,17 +123,18 @@ def reset_for_new_day():
         session_state["date"] = today
         session_state["morning"] = {
             "active": False,
+            "session_message_id": None,
             "status_message_id": None,
             "replied_users": set(),
             "user_steps": {}
         }
         session_state["evening"] = {
             "active": False,
+            "session_message_id": None,
             "status_message_id": None,
             "replied_users": set(),
             "user_steps": {}
         }
-
 
 async def update_status_message(channel, guild, session_type):
     state = session_state[session_type]
@@ -148,7 +153,6 @@ async def update_status_message(channel, guild, session_type):
     pending = max(total_users - replied, 0)
 
     label = "Morning" if session_type == "morning" else "Evening"
-
     content = (
         f"**{label} Status**\n"
         f"Replied: **{replied}/{total_users}**\n"
@@ -156,7 +160,6 @@ async def update_status_message(channel, guild, session_type):
     )
 
     await status_message.edit(content=content)
-
 
 async def start_session(session_type):
     reset_for_new_day()
@@ -177,21 +180,29 @@ async def start_session(session_type):
     state["user_steps"].clear()
 
     if session_type == "morning":
-        prompt_text = "🌞 **Morning Update Time**\nReply when ready."
+        session_text = "🌞 **Morning Update Time**\nReply to this message to submit your update."
     else:
-        prompt_text = "🌙 **Evening Update Time**\nReply when ready."
+        session_text = "🌙 **Evening Update Time**\nReply to this message to submit your update."
 
-    await channel.send(prompt_text)
+    session_message = await channel.send(session_text)
     status_message = await channel.send("Preparing status...")
 
+    state["session_message_id"] = session_message.id
     state["status_message_id"] = status_message.id
+
     await update_status_message(channel, guild, session_type)
 
+def get_active_session_type():
+    if session_state["morning"]["active"]:
+        return "morning"
+    if session_state["evening"]["active"]:
+        return "evening"
+    return None
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    ensure_workbook()
+    ensure_sheet_headers()
 
     for guild in bot.guilds:
         try:
@@ -202,11 +213,9 @@ async def on_ready():
     if not scheduler.is_running():
         scheduler.start()
 
-
 @tasks.loop(minutes=1)
 async def scheduler():
     reset_for_new_day()
-
     now = get_now()
 
     if now.hour == MORNING_HOUR and now.minute == MORNING_MINUTE:
@@ -217,30 +226,15 @@ async def scheduler():
         if not session_state["evening"]["active"]:
             await start_session("evening")
 
-
-@bot.command()
-async def testmorning(ctx):
-    await start_session("morning")
-    await ctx.send("Morning session started.")
-
-
-@bot.command()
-async def testevening(ctx):
-    await start_session("evening")
-    await ctx.send("Evening session started.")
-
-
 @bot.command()
 async def closemorning(ctx):
     session_state["morning"]["active"] = False
     await ctx.send("Morning session closed.")
 
-
 @bot.command()
 async def closeevening(ctx):
     session_state["evening"]["active"] = False
     await ctx.send("Evening session closed.")
-
 
 @bot.event
 async def on_message(message):
@@ -255,82 +249,86 @@ async def on_message(message):
     reset_for_new_day()
 
     guild = message.guild
-    if guild is None:
+    if guild is None or message.reference is None:
+        return
+
+    try:
+        referenced_message = await message.channel.fetch_message(message.reference.message_id)
+    except Exception:
         return
 
     user_id = message.author.id
     today_str = get_today_str()
     now_str = get_now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # MORNING FLOW
-    if session_state["morning"]["active"] and user_id not in session_state["morning"]["replied_users"]:
-        user_steps = session_state["morning"]["user_steps"]
+    active_session = get_active_session_type()
+    if active_session is None:
+        return
 
-        if user_id not in user_steps:
-            user_steps[user_id] = {
-                "step": 1,
-                "part1": "",
-                "part2": ""
-            }
-            await message.reply("Working on")
+    state = session_state[active_session]
+
+    if not state["active"] or user_id in state["replied_users"]:
+        return
+
+    session_message_id = state["session_message_id"]
+    user_steps = state["user_steps"]
+
+    if referenced_message.id == session_message_id:
+        if user_id in user_steps:
             return
 
-        elif user_steps[user_id]["step"] == 1 and user_steps[user_id]["part1"] == "":
-            user_steps[user_id]["part1"] = message.content.strip()
-            await message.reply("Blockers / additional note")
-            return
+        if active_session == "morning":
+            bot_prompt = await message.reply("Working on")
+        else:
+            bot_prompt = await message.reply("What did you achieve today?")
 
-        elif user_steps[user_id]["step"] == 1 and user_steps[user_id]["part1"] != "":
-            user_steps[user_id]["part2"] = message.content.strip()
-            session_state["morning"]["replied_users"].add(user_id)
+        user_steps[user_id] = {
+            "stage": "awaiting_part1",
+            "part1": "",
+            "part2": "",
+            "last_bot_message_id": bot_prompt.id
+        }
+        return
 
-            save_update(
-                today_str,
-                message.author,
-                "morning",
-                user_steps[user_id]["part1"],
-                user_steps[user_id]["part2"],
-                now_str
-            )
+    if user_id not in user_steps:
+        return
 
+    step_data = user_steps[user_id]
+
+    if referenced_message.id != step_data["last_bot_message_id"]:
+        return
+
+    if step_data["stage"] == "awaiting_part1":
+        step_data["part1"] = message.content.strip()
+
+        if active_session == "morning":
+            bot_prompt = await message.reply("Blockers / additional note")
+        else:
+            bot_prompt = await message.reply("Pending / blockers")
+
+        step_data["stage"] = "awaiting_part2"
+        step_data["last_bot_message_id"] = bot_prompt.id
+        return
+
+    if step_data["stage"] == "awaiting_part2":
+        step_data["part2"] = message.content.strip()
+
+        save_update(
+            today_str,
+            message.author,
+            active_session,
+            step_data["part1"],
+            step_data["part2"],
+            now_str
+        )
+
+        state["replied_users"].add(user_id)
+
+        if active_session == "morning":
             await message.reply("Great")
-            await update_status_message(message.channel, guild, "morning")
-            return
-
-    # EVENING FLOW
-    if session_state["evening"]["active"] and user_id not in session_state["evening"]["replied_users"]:
-        user_steps = session_state["evening"]["user_steps"]
-
-        if user_id not in user_steps:
-            user_steps[user_id] = {
-                "step": 1,
-                "part1": "",
-                "part2": ""
-            }
-            await message.reply("What did you achieve today?")
-            return
-
-        elif user_steps[user_id]["step"] == 1 and user_steps[user_id]["part1"] == "":
-            user_steps[user_id]["part1"] = message.content.strip()
-            await message.reply("Pending / blockers")
-            return
-
-        elif user_steps[user_id]["step"] == 1 and user_steps[user_id]["part1"] != "":
-            user_steps[user_id]["part2"] = message.content.strip()
-            session_state["evening"]["replied_users"].add(user_id)
-
-            save_update(
-                today_str,
-                message.author,
-                "evening",
-                user_steps[user_id]["part1"],
-                user_steps[user_id]["part2"],
-                now_str
-            )
-
+        else:
             await message.reply("Great job")
-            await update_status_message(message.channel, guild, "evening")
-            return
 
+        await update_status_message(message.channel, guild, active_session)
 
 bot.run(TOKEN)
