@@ -114,16 +114,27 @@ class UpdateModal(discord.ui.Modal):
 
 
 class StartUpdateView(discord.ui.View):
-    def __init__(self, session_type):
+    def __init__(self):
         super().__init__(timeout=None)
-        self.session_type = session_type
-        self.start_update.custom_id = f"start_update_btn_{session_type}"
+    
+    def get_session_type_for_message(self, message_id):
+        if session_state["morning"]["session_message_id"] == message_id:
+            return "morning"
+        if session_state["evening"]["session_message_id"] == message_id:
+            return "evening"
+        return None
 
-    @discord.ui.button(label="Start Update", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Start Update", style=discord.ButtonStyle.primary, custom_id="start_update_btn")
     async def start_update(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             user = interaction.user
-            state = session_state[self.session_type]
+            message_id = interaction.message.id if interaction.message else None
+            session_type = self.get_session_type_for_message(message_id)
+            if session_type is None:
+                await interaction.response.send_message("Session context not found. Please use the latest session message.", ephemeral=True)
+                return
+
+            state = session_state[session_type]
 
             if not state["active"]:
                 await interaction.response.send_message("Session is not active right now.", ephemeral=True)
@@ -139,11 +150,13 @@ class StartUpdateView(discord.ui.View):
 
             thread_id = state["thread_id"]
             thread = bot.get_channel(thread_id) if thread_id else None
+            if thread is None and thread_id is not None:
+                thread = await bot.fetch_channel(thread_id)
             if thread is None:
                 await interaction.response.send_message("Update thread not found. Please try again.", ephemeral=True)
                 return
 
-            await interaction.response.send_modal(UpdateModal(self.session_type))
+            await interaction.response.send_modal(UpdateModal(session_type))
         except Exception as e:
             print(f"[MESSAGE] Start Update button failed: {e!r}")
             if not interaction.response.is_done():
@@ -323,7 +336,7 @@ async def start_session(session_type):
     else:
         session_text = "🌙 **Evening Update Time**\nClick **Start Update** and continue in the thread."
 
-    session_message = await channel.send(session_text, view=StartUpdateView(session_type))
+    session_message = await channel.send(session_text, view=StartUpdateView())
     print(f"[SESSION] Session message sent for {session_type}.")
     thread_name = f"{session_type}-updates-{get_today_str()}"
     session_thread = await session_message.create_thread(name=thread_name)
@@ -366,8 +379,7 @@ async def on_ready():
         print(f"[SHEET] ensure_sheet_headers() failed with exception: {e!r}")
 
     if not views_registered:
-        bot.add_view(StartUpdateView("morning"))
-        bot.add_view(StartUpdateView("evening"))
+        bot.add_view(StartUpdateView())
         views_registered = True
         print("[READY] Persistent button views registered")
 
