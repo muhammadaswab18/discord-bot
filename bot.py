@@ -132,6 +132,8 @@ def get_target_members(guild):
 def reset_for_new_day():
     today = get_today_str()
     if session_state["date"] != today:
+        old_date = session_state["date"]
+        print(f"[TIME] Date rollover detected: old_date={old_date}, new_date={today}")
         session_state["date"] = today
         session_state["morning"] = {
             "active": False,
@@ -174,17 +176,20 @@ async def update_status_message(channel, guild, session_type):
     await status_message.edit(content=content)
 
 async def start_session(session_type):
+    print(f"[SESSION] start_session called with session_type={session_type}")
     reset_for_new_day()
 
     channel = bot.get_channel(CHANNEL_ID)
     if channel is None:
-        print("Channel not found. Check CHANNEL_ID.")
+        print(f"[SESSION] Channel not found for CHANNEL_ID={CHANNEL_ID}.")
         return
+    print(f"[SESSION] Channel found: channel_id={channel.id}")
 
     guild = channel.guild
     if guild is None:
-        print("Guild not found.")
+        print("[SESSION] Guild not found for resolved channel.")
         return
+    print(f"[SESSION] Using guild: name={guild.name}, id={guild.id}")
 
     state = session_state[session_type]
     state["active"] = True
@@ -197,10 +202,16 @@ async def start_session(session_type):
         session_text = "🌙 **Evening Update Time**\nReply to this message to submit your update."
 
     session_message = await channel.send(session_text)
+    print(f"[SESSION] Session message sent for {session_type}.")
     status_message = await channel.send("Preparing status...")
+    print(f"[SESSION] Status message sent for {session_type}.")
 
     state["session_message_id"] = session_message.id
     state["status_message_id"] = status_message.id
+    print(
+        f"[SESSION] Saved message IDs for {session_type}: "
+        f"session_message_id={session_message.id}, status_message_id={status_message.id}"
+    )
 
     await update_status_message(channel, guild, session_type)
 
@@ -213,30 +224,54 @@ def get_active_session_type():
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}")
-    ensure_sheet_headers()
+    print(f"[READY] Logged in as {bot.user}")
+    print(f"[TIME] Configured timezone={TZ}, current_local_time={get_now().isoformat()}")
+    print("[READY] Calling ensure_sheet_headers()")
+    try:
+        ensure_sheet_headers()
+        print("[READY] ensure_sheet_headers() completed successfully")
+    except Exception as e:
+        print(f"[SHEET] ensure_sheet_headers() failed with exception: {e!r}")
 
     for guild in bot.guilds:
+        print(f"[READY] Chunking guild: name={guild.name}, id={guild.id}")
         try:
             await guild.chunk()
         except Exception as e:
-            print(f"Could not chunk guild {guild.name}: {e}")
+            print(f"[READY] Could not chunk guild {guild.name} ({guild.id}): {e!r}")
+        else:
+            print(f"[READY] Successfully chunked guild: name={guild.name}, id={guild.id}")
 
     if not scheduler.is_running():
+        print("[READY] scheduler.start() will be called")
         scheduler.start()
+    else:
+        print("[READY] Scheduler already running")
 
 @tasks.loop(minutes=1)
 async def scheduler():
     reset_for_new_day()
     now = get_now()
+    print(
+        "[SCHEDULER] Tick: "
+        f"now={now.isoformat()}, "
+        f"morning={MORNING_HOUR:02d}:{MORNING_MINUTE:02d}, "
+        f"evening={EVENING_HOUR:02d}:{EVENING_MINUTE:02d}"
+    )
 
     if now.hour == MORNING_HOUR and now.minute == MORNING_MINUTE:
+        print("[SCHEDULER] Morning condition matched")
         if not session_state["morning"]["active"]:
             await start_session("morning")
+        else:
+            print("[SCHEDULER] Morning session skipped; already active")
 
     if now.hour == EVENING_HOUR and now.minute == EVENING_MINUTE:
+        print("[SCHEDULER] Evening condition matched")
         if not session_state["evening"]["active"]:
             await start_session("evening")
+        else:
+            print("[SCHEDULER] Evening session skipped; already active")
 
 @bot.command()
 async def closemorning(ctx):
@@ -251,22 +286,33 @@ async def closeevening(ctx):
 @bot.event
 async def on_message(message):
     if message.author.bot:
+        print(f"[MESSAGE] Ignored bot message: author_id={message.author.id}")
         return
 
     await bot.process_commands(message)
 
     if message.channel.id != CHANNEL_ID:
+        print(
+            f"[MESSAGE] Ignored message in wrong channel: "
+            f"message_channel_id={message.channel.id}, target_channel_id={CHANNEL_ID}"
+        )
         return
+    print(f"[MESSAGE] Message received in target channel: author_id={message.author.id}")
 
     reset_for_new_day()
 
     guild = message.guild
-    if guild is None or message.reference is None:
+    if guild is None:
+        print("[MESSAGE] Ignored message: no guild (likely DM)")
+        return
+    if message.reference is None:
+        print("[MESSAGE] Ignored message: no reference")
         return
 
     try:
         referenced_message = await message.channel.fetch_message(message.reference.message_id)
-    except Exception:
+    except Exception as e:
+        print(f"[MESSAGE] Ignored message: failed to fetch referenced message: {e!r}")
         return
 
     user_id = message.author.id
@@ -275,11 +321,17 @@ async def on_message(message):
 
     active_session = get_active_session_type()
     if active_session is None:
+        print("[MESSAGE] Ignored message: no active session")
         return
+    print(f"[MESSAGE] Active session detected: session_type={active_session}")
 
     state = session_state[active_session]
 
     if not state["active"] or user_id in state["replied_users"]:
+        if not state["active"]:
+            print(f"[MESSAGE] Ignored message: session not active for {active_session}")
+        else:
+            print(f"[MESSAGE] Ignored message: user already replied user_id={user_id}")
         return
 
     session_message_id = state["session_message_id"]
@@ -287,6 +339,7 @@ async def on_message(message):
 
     if referenced_message.id == session_message_id:
         if user_id in user_steps:
+            print(f"[MESSAGE] Ignored message: user already in progress user_id={user_id}")
             return
 
         if active_session == "morning":
@@ -300,14 +353,23 @@ async def on_message(message):
             "part2": "",
             "last_bot_message_id": bot_prompt.id
         }
+        print(
+            f"[MESSAGE] Stage transition: user_id={user_id}, "
+            f"stage=awaiting_part1, bot_prompt_id={bot_prompt.id}"
+        )
         return
 
     if user_id not in user_steps:
+        print(f"[MESSAGE] Ignored message: user has no active flow user_id={user_id}")
         return
 
     step_data = user_steps[user_id]
 
     if referenced_message.id != step_data["last_bot_message_id"]:
+        print(
+            f"[MESSAGE] Ignored message: wrong referenced message for user_id={user_id}, "
+            f"expected={step_data['last_bot_message_id']}, got={referenced_message.id}"
+        )
         return
 
     if step_data["stage"] == "awaiting_part1":
@@ -320,6 +382,10 @@ async def on_message(message):
 
         step_data["stage"] = "awaiting_part2"
         step_data["last_bot_message_id"] = bot_prompt.id
+        print(
+            f"[MESSAGE] Stage transition: user_id={user_id}, "
+            f"stage=awaiting_part2, bot_prompt_id={bot_prompt.id}"
+        )
         return
 
     if step_data["stage"] == "awaiting_part2":
@@ -332,6 +398,10 @@ async def on_message(message):
             step_data["part1"],
             step_data["part2"],
             now_str
+        )
+        print(
+            f"[MESSAGE] Saved update successfully: "
+            f"user_id={user_id}, session_type={active_session}, date={today_str}"
         )
 
         state["replied_users"].add(user_id)
