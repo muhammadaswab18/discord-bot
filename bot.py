@@ -382,7 +382,9 @@ async def on_message(message):
 
     if user_id not in user_steps:
         if active_session == "morning":
-            bot_prompt = await thread.send(f"{message.author.mention} Working on")
+            bot_prompt = await thread.send(
+                f"{message.author.mention} What will you be working on today?"
+            )
         else:
             bot_prompt = await thread.send(f"{message.author.mention} What did you achieve today?")
 
@@ -404,9 +406,11 @@ async def on_message(message):
         step_data["part1"] = message.content.strip()
         step_data["part1_message_id"] = message.id
         if active_session == "morning":
-            await thread.send(f"{message.author.mention} Blockers / additional note")
+            await thread.send(
+                f"{message.author.mention} Any challenges or support you need to get started?"
+            )
         else:
-            await thread.send(f"{message.author.mention} Pending / blockers")
+            await thread.send(f"{message.author.mention} Any obstacles that still need attention?")
         step_data["stage"] = "awaiting_part2"
         print(f"[MESSAGE] Stage transition: user_id={user_id}, stage=awaiting_part2")
         return
@@ -426,9 +430,9 @@ async def on_message(message):
         step_data["submitted"] = True
 
         if active_session == "morning":
-            await thread.send(f"{message.author.mention} Great")
+            await thread.send(f"{message.author.mention} Great, good day ahead.")
         else:
-            await thread.send(f"{message.author.mention} Great job")
+            await thread.send(f"{message.author.mention} Great job.")
 
         main_channel = bot.get_channel(CHANNEL_ID)
         if main_channel is not None:
