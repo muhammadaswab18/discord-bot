@@ -37,6 +37,7 @@ session_state = {
     "morning": {
         "active": False,
         "session_message_id": None,
+        "thread_id": None,
         "status_message_id": None,
         "replied_users": set(),
         "user_steps": {}
@@ -44,6 +45,7 @@ session_state = {
     "evening": {
         "active": False,
         "session_message_id": None,
+        "thread_id": None,
         "status_message_id": None,
         "replied_users": set(),
         "user_steps": {}
@@ -139,6 +141,7 @@ def reset_for_new_day():
         session_state["morning"] = {
             "active": False,
             "session_message_id": None,
+            "thread_id": None,
             "status_message_id": None,
             "replied_users": set(),
             "user_steps": {}
@@ -146,6 +149,7 @@ def reset_for_new_day():
         session_state["evening"] = {
             "active": False,
             "session_message_id": None,
+            "thread_id": None,
             "status_message_id": None,
             "replied_users": set(),
             "user_steps": {}
@@ -198,20 +202,29 @@ async def start_session(session_type):
     state["user_steps"].clear()
 
     if session_type == "morning":
-        session_text = "🌞 **Morning Update Time**\nReply to this message to submit your update."
+        session_text = "🌞 **Morning Update Time**\nPlease submit updates in the thread."
     else:
-        session_text = "🌙 **Evening Update Time**\nReply to this message to submit your update."
+        session_text = "🌙 **Evening Update Time**\nPlease submit updates in the thread."
 
     session_message = await channel.send(session_text)
     print(f"[SESSION] Session message sent for {session_type}.")
+    thread_name = f"{session_type}-updates-{get_today_str()}"
+    session_thread = await session_message.create_thread(name=thread_name)
+    print(f"[SESSION] Session thread created: thread_id={session_thread.id}")
+    await session_thread.send(
+        f"Use this thread for {session_type} updates.\n"
+        "Send any message to start and I will guide you step-by-step."
+    )
     status_message = await channel.send("Preparing status...")
     print(f"[SESSION] Status message sent for {session_type}.")
 
     state["session_message_id"] = session_message.id
+    state["thread_id"] = session_thread.id
     state["status_message_id"] = status_message.id
     print(
         f"[SESSION] Saved message IDs for {session_type}: "
-        f"session_message_id={session_message.id}, status_message_id={status_message.id}"
+        f"session_message_id={session_message.id}, thread_id={session_thread.id}, "
+        f"status_message_id={status_message.id}"
     )
 
     await update_status_message(channel, guild, session_type)
@@ -294,7 +307,9 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-    if message.channel.id != CHANNEL_ID:
+    is_main_channel = message.channel.id == CHANNEL_ID
+    is_thread_message = isinstance(message.channel, discord.Thread)
+    if not is_main_channel and not is_thread_message:
         print(
             f"[MESSAGE] Ignored message in wrong channel: "
             f"message_channel_id={message.channel.id}, target_channel_id={CHANNEL_ID}"
@@ -328,13 +343,31 @@ async def on_message(message):
             print(f"[MESSAGE] Ignored message: user already replied user_id={user_id}")
         return
 
+    thread_id = state["thread_id"]
+    if thread_id is None:
+        print(f"[MESSAGE] Ignored message: no thread configured for {active_session}")
+        return
+
+    if is_main_channel:
+        print("[MESSAGE] Ignored message in main channel; expecting thread message")
+        return
+
+    if message.channel.id != thread_id:
+        print(
+            f"[MESSAGE] Ignored message in non-session thread: "
+            f"thread_id={message.channel.id}, expected_thread_id={thread_id}"
+        )
+        return
+
     user_steps = state["user_steps"]
 
     if user_id not in user_steps:
         if active_session == "morning":
-            bot_prompt = await message.reply("Working on")
+            bot_prompt = await message.channel.send(f"{message.author.mention} Working on")
         else:
-            bot_prompt = await message.reply("What did you achieve today?")
+            bot_prompt = await message.channel.send(
+                f"{message.author.mention} What did you achieve today?"
+            )
 
         user_steps[user_id] = {
             "stage": "awaiting_part1",
@@ -354,9 +387,13 @@ async def on_message(message):
         step_data["part1"] = message.content.strip()
 
         if active_session == "morning":
-            bot_prompt = await message.reply("Blockers / additional note")
+            bot_prompt = await message.channel.send(
+                f"{message.author.mention} Blockers / additional note"
+            )
         else:
-            bot_prompt = await message.reply("Pending / blockers")
+            bot_prompt = await message.channel.send(
+                f"{message.author.mention} Pending / blockers"
+            )
 
         step_data["stage"] = "awaiting_part2"
         step_data["last_bot_message_id"] = bot_prompt.id
@@ -385,10 +422,12 @@ async def on_message(message):
         state["replied_users"].add(user_id)
 
         if active_session == "morning":
-            await message.reply("Great")
+            await message.channel.send(f"{message.author.mention} Great")
         else:
-            await message.reply("Great job")
+            await message.channel.send(f"{message.author.mention} Great job")
 
-        await update_status_message(message.channel, guild, active_session)
+        main_channel = bot.get_channel(CHANNEL_ID)
+        if main_channel is not None:
+            await update_status_message(main_channel, guild, active_session)
 
 bot.run(TOKEN)
