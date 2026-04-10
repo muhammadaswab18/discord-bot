@@ -132,6 +132,10 @@ def get_today_str():
 def get_target_members(guild):
     return [member for member in guild.members if not member.bot]
 
+
+def get_human_date():
+    return get_now().strftime("%b %d, %Y")
+
 def reset_for_new_day():
     today = get_today_str()
     if session_state["date"] != today:
@@ -171,10 +175,10 @@ async def update_status_message(channel, guild, session_type):
     replied = len(state["replied_users"])
     pending = max(total_users - replied, 0)
 
-    label = "Morning" if session_type == "morning" else "Evening"
+    plan_label = "Standup 1 - Daily Plan" if session_type == "morning" else "Standup 2 - Daily Results"
     content = (
-        f"**{label} Status**\n"
-        f"Replied: **{replied}/{total_users}**\n"
+        f"**{plan_label}**\n"
+        f"Reported: **{replied} out of {total_users}**\n"
         f"Pending: **{pending}**"
     )
 
@@ -202,9 +206,17 @@ async def start_session(session_type):
     state["user_steps"].clear()
 
     if session_type == "morning":
-        session_text = "🌞 **Morning Update Time**\nSend updates in the thread."
+        title = f"Standup 1 - Daily Plan, {get_human_date()}"
+        session_text = (
+            f"🧠 **{title}**\n\n"
+            f"Find all reports for **{title}** in the thread. 🧵"
+        )
     else:
-        session_text = "🌙 **Evening Update Time**\nSend updates in the thread."
+        title = f"Standup 2 - Daily Results, {get_human_date()}"
+        session_text = (
+            f"🌙 **{title}**\n\n"
+            f"Find all reports for **{title}** in the thread. 🧵"
+        )
 
     session_message = await channel.send(session_text)
     print(f"[SESSION] Session message sent for {session_type}.")
@@ -378,7 +390,10 @@ async def on_message(message):
             "stage": "awaiting_part1",
             "part1": "",
             "part2": "",
-            "last_bot_message_id": bot_prompt.id
+            "last_bot_message_id": bot_prompt.id,
+            "part1_message_id": None,
+            "part2_message_id": None,
+            "submitted": False
         }
         print(f"[MESSAGE] Stage transition: user_id={user_id}, stage=awaiting_part1")
         return
@@ -387,6 +402,7 @@ async def on_message(message):
 
     if step_data["stage"] == "awaiting_part1":
         step_data["part1"] = message.content.strip()
+        step_data["part1_message_id"] = message.id
         if active_session == "morning":
             await thread.send(f"{message.author.mention} Blockers / additional note")
         else:
@@ -397,6 +413,7 @@ async def on_message(message):
 
     if step_data["stage"] == "awaiting_part2":
         step_data["part2"] = message.content.strip()
+        step_data["part2_message_id"] = message.id
         save_update(
             today_str,
             message.author,
@@ -406,6 +423,7 @@ async def on_message(message):
             now_str
         )
         state["replied_users"].add(user_id)
+        step_data["submitted"] = True
 
         if active_session == "morning":
             await thread.send(f"{message.author.mention} Great")
@@ -415,5 +433,53 @@ async def on_message(message):
         main_channel = bot.get_channel(CHANNEL_ID)
         if main_channel is not None:
             await update_status_message(main_channel, guild, active_session)
+
+
+@bot.event
+async def on_message_edit(before, after):
+    if after.author.bot:
+        return
+    if before.content == after.content:
+        return
+    if not isinstance(after.channel, discord.Thread):
+        return
+
+    active_session = get_active_session_type()
+    if active_session is None:
+        return
+
+    state = session_state[active_session]
+    if not state["active"] or after.channel.id != state.get("thread_id"):
+        return
+
+    user_id = after.author.id
+    if user_id not in state["user_steps"]:
+        return
+
+    step_data = state["user_steps"][user_id]
+    if not step_data.get("submitted"):
+        return
+
+    updated = False
+    if after.id == step_data.get("part1_message_id"):
+        step_data["part1"] = after.content.strip()
+        updated = True
+    elif after.id == step_data.get("part2_message_id"):
+        step_data["part2"] = after.content.strip()
+        updated = True
+
+    if not updated:
+        return
+
+    save_update(
+        get_today_str(),
+        after.author,
+        active_session,
+        step_data.get("part1", ""),
+        step_data.get("part2", ""),
+        get_now().strftime("%Y-%m-%d %H:%M:%S")
+    )
+
+    await after.channel.send(f"{after.author.mention} updated. Sheet synced.")
 
 bot.run(TOKEN)
