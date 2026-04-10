@@ -308,15 +308,6 @@ async def on_message(message):
     if guild is None:
         print("[MESSAGE] Ignored message: no guild (likely DM)")
         return
-    if message.reference is None:
-        print("[MESSAGE] Ignored message: no reference")
-        return
-
-    try:
-        referenced_message = await message.channel.fetch_message(message.reference.message_id)
-    except Exception as e:
-        print(f"[MESSAGE] Ignored message: failed to fetch referenced message: {e!r}")
-        return
 
     user_id = message.author.id
     today_str = get_today_str()
@@ -337,14 +328,9 @@ async def on_message(message):
             print(f"[MESSAGE] Ignored message: user already replied user_id={user_id}")
         return
 
-    session_message_id = state["session_message_id"]
     user_steps = state["user_steps"]
 
-    if referenced_message.id == session_message_id:
-        if user_id in user_steps:
-            print(f"[MESSAGE] Ignored message: user already in progress user_id={user_id}")
-            return
-
+    if user_id not in user_steps:
         if active_session == "morning":
             bot_prompt = await message.reply("Working on")
         else:
@@ -362,18 +348,7 @@ async def on_message(message):
         )
         return
 
-    if user_id not in user_steps:
-        print(f"[MESSAGE] Ignored message: user has no active flow user_id={user_id}")
-        return
-
     step_data = user_steps[user_id]
-
-    if referenced_message.id != step_data["last_bot_message_id"]:
-        print(
-            f"[MESSAGE] Ignored message: wrong referenced message for user_id={user_id}, "
-            f"expected={step_data['last_bot_message_id']}, got={referenced_message.id}"
-        )
-        return
 
     if step_data["stage"] == "awaiting_part1":
         step_data["part1"] = message.content.strip()
