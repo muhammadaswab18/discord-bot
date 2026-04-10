@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -233,20 +234,22 @@ async def on_ready():
     except Exception as e:
         print(f"[SHEET] ensure_sheet_headers() failed with exception: {e!r}")
 
-    for guild in bot.guilds:
-        print(f"[READY] Chunking guild: name={guild.name}, id={guild.id}")
-        try:
-            await guild.chunk()
-        except Exception as e:
-            print(f"[READY] Could not chunk guild {guild.name} ({guild.id}): {e!r}")
-        else:
-            print(f"[READY] Successfully chunked guild: name={guild.name}, id={guild.id}")
-
     if not scheduler.is_running():
         print("[READY] scheduler.start() will be called")
         scheduler.start()
     else:
         print("[READY] Scheduler already running")
+
+    for guild in bot.guilds:
+        print(f"[READY] Chunking guild: name={guild.name}, id={guild.id}")
+        try:
+            await asyncio.wait_for(guild.chunk(), timeout=20)
+        except asyncio.TimeoutError:
+            print(f"[READY] Guild chunk timed out for guild {guild.name} ({guild.id})")
+        except Exception as e:
+            print(f"[READY] Could not chunk guild {guild.name} ({guild.id}): {e!r}")
+        else:
+            print(f"[READY] Successfully chunked guild: name={guild.name}, id={guild.id}")
 
 @tasks.loop(minutes=1)
 async def scheduler():
