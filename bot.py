@@ -31,6 +31,7 @@ intents.members = True
 intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+views_registered = False
 
 
 def get_user_color(user_id):
@@ -116,31 +117,37 @@ class StartUpdateView(discord.ui.View):
     def __init__(self, session_type):
         super().__init__(timeout=None)
         self.session_type = session_type
+        self.start_update.custom_id = f"start_update_btn_{session_type}"
 
-    @discord.ui.button(label="Start Update", style=discord.ButtonStyle.primary, custom_id="start_update_btn")
+    @discord.ui.button(label="Start Update", style=discord.ButtonStyle.primary)
     async def start_update(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user = interaction.user
-        state = session_state[self.session_type]
+        try:
+            user = interaction.user
+            state = session_state[self.session_type]
 
-        if not state["active"]:
-            await interaction.response.send_message("Session is not active right now.", ephemeral=True)
-            return
+            if not state["active"]:
+                await interaction.response.send_message("Session is not active right now.", ephemeral=True)
+                return
 
-        if user.id in state["replied_users"]:
-            await interaction.response.send_message("You already submitted this update.", ephemeral=True)
-            return
+            if user.id in state["replied_users"]:
+                await interaction.response.send_message("You already submitted this update.", ephemeral=True)
+                return
 
-        if user.id in state["user_steps"]:
-            await interaction.response.send_message("Your update flow is already in progress.", ephemeral=True)
-            return
+            if user.id in state["user_steps"]:
+                await interaction.response.send_message("Your update flow is already in progress.", ephemeral=True)
+                return
 
-        thread_id = state["thread_id"]
-        thread = bot.get_channel(thread_id) if thread_id else None
-        if thread is None:
-            await interaction.response.send_message("Update thread not found. Please try again.", ephemeral=True)
-            return
+            thread_id = state["thread_id"]
+            thread = bot.get_channel(thread_id) if thread_id else None
+            if thread is None:
+                await interaction.response.send_message("Update thread not found. Please try again.", ephemeral=True)
+                return
 
-        await interaction.response.send_modal(UpdateModal(self.session_type))
+            await interaction.response.send_modal(UpdateModal(self.session_type))
+        except Exception as e:
+            print(f"[MESSAGE] Start Update button failed: {e!r}")
+            if not interaction.response.is_done():
+                await interaction.response.send_message("Failed to start update. Please try again.", ephemeral=True)
 
 session_state = {
     "date": None,
@@ -348,6 +355,7 @@ def get_active_session_type():
 
 @bot.event
 async def on_ready():
+    global views_registered
     print(f"[READY] Logged in as {bot.user}")
     print(f"[TIME] Configured timezone={TZ}, current_local_time={get_now().isoformat()}")
     print("[READY] Calling ensure_sheet_headers()")
@@ -356,6 +364,12 @@ async def on_ready():
         print("[READY] ensure_sheet_headers() completed successfully")
     except Exception as e:
         print(f"[SHEET] ensure_sheet_headers() failed with exception: {e!r}")
+
+    if not views_registered:
+        bot.add_view(StartUpdateView("morning"))
+        bot.add_view(StartUpdateView("evening"))
+        views_registered = True
+        print("[READY] Persistent button views registered")
 
     if not scheduler.is_running():
         print("[READY] scheduler.start() will be called")
