@@ -187,6 +187,11 @@ async def update_status_message(channel, guild, session_type):
 async def start_session(session_type):
     print(f"[SESSION] start_session called with session_type={session_type}")
     reset_for_new_day()
+    other_session_type = "evening" if session_type == "morning" else "morning"
+    if session_state[other_session_type]["active"]:
+        # Ensure only one standup session is active at a time.
+        session_state[other_session_type]["active"] = False
+        print(f"[SESSION] Deactivated previous active session: session_type={other_session_type}")
 
     channel = bot.get_channel(CHANNEL_ID)
     if channel is None:
@@ -247,6 +252,16 @@ def get_active_session_type():
     if session_state["evening"]["active"]:
         return "evening"
     return None
+
+def get_session_type_for_message(message):
+    if isinstance(message.channel, discord.Thread):
+        thread_id = message.channel.id
+        for session_type in ("morning", "evening"):
+            state = session_state[session_type]
+            if state["active"] and state.get("thread_id") == thread_id:
+                return session_type
+        return None
+    return get_active_session_type()
 
 @bot.event
 async def on_ready():
@@ -336,7 +351,7 @@ async def on_message(message):
         print("[MESSAGE] Ignored message: no guild (likely DM)")
         return
 
-    active_session = get_active_session_type()
+    active_session = get_session_type_for_message(message)
     if active_session is None:
         print("[MESSAGE] Ignored message: no active session")
         return
@@ -448,7 +463,7 @@ async def on_message_edit(before, after):
     if not isinstance(after.channel, discord.Thread):
         return
 
-    active_session = get_active_session_type()
+    active_session = get_session_type_for_message(after)
     if active_session is None:
         return
 
